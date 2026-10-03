@@ -13,6 +13,23 @@ static NSString *const kKeyActive=@"active";
 
 #define MILLISECOND ((uint64_t)1000000)
 
+/* Undocumented double-valued scroll fields added in macOS 27. 175/176 carry the
+ continuous X/Y delta and 177/178 the raw device X/Y delta, both in device direction.
+ They must be negated together with the documented fields, otherwise consumers that
+ read them see the original direction and scrolling jitters back and forth. */
+static const CGEventField kScrollWheelEventContinuousDeltaAxis2=(CGEventField)175;
+static const CGEventField kScrollWheelEventContinuousDeltaAxis1=(CGEventField)176;
+static const CGEventField kScrollWheelEventDeviceDeltaAxis2=(CGEventField)177;
+static const CGEventField kScrollWheelEventDeviceDeltaAxis1=(CGEventField)178;
+
+static void _negateDoubleField(CGEventRef event, CGEventField field)
+{
+    const double value=CGEventGetDoubleValueField(event, field);
+    if (value!=0) {
+        CGEventSetDoubleValueField(event, field, -value);
+    }
+}
+
 static ScrollPhase _momentumPhaseForEvent(CGEventRef event)
 {
     switch ([[NSEvent eventWithCGEvent:event] momentumPhase]) {
@@ -138,6 +155,7 @@ static CGEventRef _callback(CGEventTapProxy proxy,
             [tap->logger logPhase:phase forKey:@"phase"];
             
             // work out the event source
+            const BOOL hasPhase=[event phase]!=NSEventPhaseNone || [event momentumPhase]!=NSEventPhaseNone;
             const ScrollEventSource lastSource=tap->lastSource;
             const ScrollEventSource source=(^{
                 
@@ -145,6 +163,16 @@ static CGEventRef _callback(CGEventTapProxy proxy,
                 {
                     [tap->logger logBool:YES forKey:@"usingNotContinuous"];
                     return ScrollEventSourceMouse; // assume anything not-continuous is a mouse
+                }
+
+                /* Trackpad scrolling always carries a scroll or momentum phase. Continuous events
+                 with neither come from mouse smooth-scrolling drivers such as Logi Options+;
+                 guessing from touch timing classified them inconsistently and made scrolling
+                 jump back and forth. */
+                if (!hasPhase)
+                {
+                    [tap->logger logBool:YES forKey:@"usingNoPhase"];
+                    return ScrollEventSourceMouse;
                 }
                 
                 if (touching>=2 && touchElapsed<(MILLISECOND*222))
@@ -163,7 +191,11 @@ static CGEventRef _callback(CGEventTapProxy proxy,
                 [tap->logger logBool:YES forKey:@"usingPrevious"];
                 return tap->lastSource;
             })();
-            tap->lastSource=source;
+            // Only phased streams fall back to the previous source, so mouse events interleaved
+            // with a trackpad momentum tail must not overwrite it.
+            if (continuous && hasPhase) {
+                tap->lastSource=source;
+            }
             
             // finally, do we reverse the scroll or not?
             const BOOL invert=(^BOOL {
@@ -229,13 +261,23 @@ static CGEventRef _callback(CGEventTapProxy proxy,
                 if (ioHidEventRef) {
                     IOHIDEventSetFloatValue(ioHidEventRef, kIOHIDEventFieldScrollY, iohid_axis1*vmul);
                 }
+                if (@available(macOS 27.0, *)) {
+                    if (vmul<0) {
+                        _negateDoubleField(eventRef, kScrollWheelEventContinuousDeltaAxis1);
+                        _negateDoubleField(eventRef, kScrollWheelEventDeviceDeltaAxis1);
+                    }
+                }
             }
             if (hmul!=1) { // horizontal
                 CGEventSetIntegerValueField(eventRef, kCGScrollWheelEventDeltaAxis2, axis2*hmul);
                 CGEventSetDoubleValueField(eventRef, kCGScrollWheelEventFixedPtDeltaAxis2, fixedpt_axis2*hmul);
                 CGEventSetIntegerValueField(eventRef, kCGScrollWheelEventPointDeltaAxis2, point_axis2*hmul);
                 if (ioHidEventRef) {
-                    IOHIDEventSetFloatValue(ioHidEventRef, kIOHIDEventFieldScrollX, iohid_axis2*vmul);
+                    IOHIDEventSetFloatValue(ioHidEventRef, kIOHIDEventFieldScrollX, iohid_axis2*hmul);
+                }
+                if (@available(macOS 27.0, *)) {
+                    _negateDoubleField(eventRef, kScrollWheelEventContinuousDeltaAxis2);
+                    _negateDoubleField(eventRef, kScrollWheelEventDeviceDeltaAxis2);
                 }
             }
 
