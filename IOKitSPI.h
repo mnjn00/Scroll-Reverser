@@ -42,5 +42,6 @@ static const IOHIDEventField kIOHIDEventFieldScrollY = (kIOHIDEventFieldScrollBa
 
 IOHIDFloat IOHIDEventGetFloatValue(IOHIDEventRef, IOHIDEventField);
 void IOHIDEventSetFloatValue(IOHIDEventRef, IOHIDEventField, IOHIDFloat);
+IOHIDEventSenderID IOHIDEventGetSenderID(IOHIDEventRef);
 
 #endif /* IOKitSPI_h */

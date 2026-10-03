@@ -6,6 +6,9 @@
 #import "TapLogger.h"
 #import "AppDelegate.h"
 #import <mach/mach_time.h>
+#import <IOKit/hid/IOHIDUsageTables.h>
+#import <IOKit/hidsystem/IOHIDEventSystemClient.h>
+#import <IOKit/hidsystem/IOHIDServiceClient.h>
 
 static BOOL _preventReverseOtherApp;
 
@@ -43,6 +46,44 @@ static ScrollPhase _momentumPhaseForEvent(CGEventRef event)
         default:
             return ScrollPhaseNormal;
     }
+}
+
+/* Whether the HID service that sent a scroll event is a multitouch trackpad. This covers the
+ built-in and Magic trackpads, and also the virtual trackpad Universal Control creates on the
+ receiving Mac, whose touches are not forwarded and so cannot be detected from gesture events.
+ Magic Mouse shares the multitouch usage, so it is excluded by name. Results are cached per sender. */
+static BOOL _senderIsTrackpad(IOHIDEventSenderID senderID)
+{
+    static IOHIDEventSystemClientRef client;
+    static NSMutableDictionary<NSNumber *, NSNumber *> *cache;
+    if (!client) {
+        client=IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault);
+        cache=[NSMutableDictionary dictionary];
+    }
+    NSNumber *const key=@(senderID);
+    NSNumber *const cached=cache[key];
+    if (cached) {
+        return [cached boolValue];
+    }
+
+    BOOL trackpad=NO;
+    NSArray *const services=CFBridgingRelease(IOHIDEventSystemClientCopyServices(client));
+    for (id service in services) {
+        IOHIDServiceClientRef const ref=(__bridge IOHIDServiceClientRef)service;
+        NSNumber *const registryID=(__bridge NSNumber *)IOHIDServiceClientGetRegistryID(ref);
+        if ([registryID unsignedLongLongValue]!=senderID) {
+            continue;
+        }
+        NSNumber *const page=CFBridgingRelease(IOHIDServiceClientCopyProperty(ref, CFSTR("PrimaryUsagePage")));
+        NSNumber *const usage=CFBridgingRelease(IOHIDServiceClientCopyProperty(ref, CFSTR("PrimaryUsage")));
+        NSString *const product=CFBridgingRelease(IOHIDServiceClientCopyProperty(ref, CFSTR("Product")));
+        trackpad=[page intValue]==kHIDPage_Digitizer
+            && [usage intValue]==kHIDUsage_Dig_MultiplePointDigitizer
+            && [product rangeOfString:@"Mouse" options:NSCaseInsensitiveSearch].location==NSNotFound;
+        break;
+    }
+    cache[key]=@(trackpad);
+    return trackpad;
 }
 
 static uint64_t _nanoseconds(void)
@@ -173,6 +214,12 @@ static CGEventRef _callback(CGEventTapProxy proxy,
                 {
                     [tap->logger logBool:YES forKey:@"usingNoPhase"];
                     return ScrollEventSourceMouse;
+                }
+
+                if (ioHidEventRef && _senderIsTrackpad(IOHIDEventGetSenderID(ioHidEventRef)))
+                {
+                    [tap->logger logBool:YES forKey:@"usingSender"];
+                    return ScrollEventSourceTrackpad;
                 }
                 
                 if (touching>=2 && touchElapsed<(MILLISECOND*222))
