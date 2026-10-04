@@ -52,21 +52,8 @@ static ScrollPhase _momentumPhaseForEvent(CGEventRef event)
  built-in and Magic trackpads, and also the virtual trackpad Universal Control creates on the
  receiving Mac, whose touches are not forwarded and so cannot be detected from gesture events.
  Magic Mouse shares the multitouch usage, so it is excluded by name. Results are cached per sender. */
-static BOOL _senderIsTrackpad(IOHIDEventSenderID senderID)
+static NSNumber *_lookupTrackpad(IOHIDEventSystemClientRef client, IOHIDEventSenderID senderID)
 {
-    static IOHIDEventSystemClientRef client;
-    static NSMutableDictionary<NSNumber *, NSNumber *> *cache;
-    if (!client) {
-        client=IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault);
-        cache=[NSMutableDictionary dictionary];
-    }
-    NSNumber *const key=@(senderID);
-    NSNumber *const cached=cache[key];
-    if (cached) {
-        return [cached boolValue];
-    }
-
-    BOOL trackpad=NO;
     NSArray *const services=CFBridgingRelease(IOHIDEventSystemClientCopyServices(client));
     for (id service in services) {
         IOHIDServiceClientRef const ref=(__bridge IOHIDServiceClientRef)service;
@@ -77,13 +64,38 @@ static BOOL _senderIsTrackpad(IOHIDEventSenderID senderID)
         NSNumber *const page=CFBridgingRelease(IOHIDServiceClientCopyProperty(ref, CFSTR("PrimaryUsagePage")));
         NSNumber *const usage=CFBridgingRelease(IOHIDServiceClientCopyProperty(ref, CFSTR("PrimaryUsage")));
         NSString *const product=CFBridgingRelease(IOHIDServiceClientCopyProperty(ref, CFSTR("Product")));
-        trackpad=[page intValue]==kHIDPage_Digitizer
+        return @([page intValue]==kHIDPage_Digitizer
             && [usage intValue]==kHIDUsage_Dig_MultiplePointDigitizer
-            && [product rangeOfString:@"Mouse" options:NSCaseInsensitiveSearch].location==NSNotFound;
-        break;
+            && [product rangeOfString:@"Mouse" options:NSCaseInsensitiveSearch].location==NSNotFound);
     }
-    cache[key]=@(trackpad);
-    return trackpad;
+    return nil;
+}
+
+static BOOL _senderIsTrackpad(IOHIDEventSenderID senderID)
+{
+    static IOHIDEventSystemClientRef client;
+    static NSMutableDictionary<NSNumber *, NSNumber *> *cache;
+    if (!cache) {
+        cache=[NSMutableDictionary dictionary];
+    }
+    NSNumber *const key=@(senderID);
+    NSNumber *const cached=cache[key];
+    if (cached) {
+        return [cached boolValue];
+    }
+
+    /* A client lists only the services that existed when it was created. Universal Control makes a new
+     virtual trackpad each time the other Mac reconnects, so an unknown sender needs a fresh client. */
+    NSNumber *trackpad=client ? _lookupTrackpad(client, senderID) : nil;
+    if (!trackpad) {
+        if (client) {
+            CFRelease(client);
+        }
+        client=IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault);
+        trackpad=_lookupTrackpad(client, senderID) ?: @NO;
+    }
+    cache[key]=trackpad;
+    return [trackpad boolValue];
 }
 
 static uint64_t _nanoseconds(void)
